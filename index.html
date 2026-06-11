@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FORKNIFE — Battle Royale</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0f1e; font-family: 'Arial Black', 'Helvetica Neue', Arial, sans-serif; user-select: none; -webkit-user-select: none; }
+  #c { display: block; cursor: none; }
+
+  .overlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, rgba(20,16,60,.78), rgba(6,8,22,.92));
+    backdrop-filter: blur(2px);
+    color: #fff; text-align: center;
+  }
+  .logo {
+    font-size: min(15vw, 110px); font-weight: 900; font-style: italic; letter-spacing: 3px;
+    transform: skew(-7deg); line-height: 1;
+    color: #fff;
+    text-shadow: 0 5px 0 #7a3bff, 0 9px 0 #4a1fa8, 0 14px 30px rgba(0,0,0,.7);
+  }
+  .tagline { margin-top: 14px; font-size: 16px; font-weight: 700; color: #ffd54a; letter-spacing: 1px; font-style: italic; }
+  .btn {
+    margin-top: 34px; padding: 16px 64px; font-size: 26px; font-weight: 900; font-style: italic; letter-spacing: 2px;
+    font-family: inherit; color: #3a2300; border: none; border-radius: 10px; cursor: pointer;
+    background: linear-gradient(180deg, #ffe45c, #ffb52e);
+    box-shadow: 0 5px 0 #b06a00, 0 10px 24px rgba(0,0,0,.55);
+    transform: skew(-5deg); transition: transform .08s, box-shadow .08s;
+  }
+  .btn:hover { transform: skew(-5deg) translateY(-2px) scale(1.03); }
+  .btn:active { transform: skew(-5deg) translateY(3px); box-shadow: 0 2px 0 #b06a00; }
+  .controls {
+    margin-top: 36px; font-family: Arial, sans-serif; font-size: 14px; line-height: 1.9; color: #cfd3ff;
+    background: rgba(10,12,34,.55); border: 1px solid rgba(140,120,255,.35); border-radius: 12px; padding: 14px 28px;
+  }
+  .controls b { color: #fff; background: rgba(122,59,255,.45); border: 1px solid rgba(170,130,255,.5); border-radius: 5px; padding: 1px 7px; font-family: 'Arial Black', sans-serif; }
+  .small { margin-top: 18px; font-family: Arial, sans-serif; font-size: 12px; color: #8a8fb8; }
+  #end .placement { font-size: min(12vw, 84px); font-weight: 900; font-style: italic; transform: skew(-6deg); }
+  #end .sub { margin-top: 10px; font-size: 20px; color: #cfd3ff; font-family: Arial, sans-serif; }
+  .gold { color: #ffd54a; text-shadow: 0 4px 0 #a06000, 0 8px 26px rgba(255,180,0,.45); }
+  .red { color: #ff5d6c; text-shadow: 0 4px 0 #7a1020, 0 8px 26px rgba(255,40,70,.4); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="menu" class="overlay">
+  <div class="logo">FORKNIFE</div>
+  <div class="tagline">THE LEGALLY DISTINCT BATTLE ROYALE</div>
+  <button id="playBtn" class="btn">PLAY</button>
+  <div class="controls">
+    <b>WASD</b> move &nbsp; <b>MOUSE</b> aim / fire &nbsp; <b>1–5</b> &amp; <b>WHEEL</b> hotbar &nbsp; <b>R</b> reload<br>
+    <b>Q</b> build mode (walls cost 10 mats) &nbsp; <b>E</b> open chest / pick up &nbsp; <b>G</b> drop item &nbsp; <b>M</b> mute<br>
+    Swing your pickaxe at <span style="color:#7fe06a">trees</span> &amp; <span style="color:#b9bdc7">rocks</span> for mats. Outlast 15 bots. Don't melt in the storm.
+  </div>
+  <div class="small">SPACE to jump from the bus. Last one standing gets the Victory Royale.</div>
+</div>
+
+<div id="end" class="overlay" style="display:none"></div>
+
+<script src="game.js"></script>
+</body>
+</html>
