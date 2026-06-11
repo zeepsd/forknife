@@ -14,6 +14,17 @@
                      {t:'start',you,roster,world}  {t:'snap',...15Hz}
    ============================================================ */
 
+// Stale-cache guard: if the browser paired an old cached game.js with this
+// net.js (version skew), NET won't exist. Force one clean cache-busting reload.
+if (typeof NET === 'undefined') {
+  if (!location.search.includes('r=')) {
+    location.replace(location.pathname + '?r=' + Date.now());
+  } else {
+    document.getElementById('netStatus').textContent = 'update glitch — hard refresh with Cmd+Shift+R';
+  }
+  throw new Error('forknife version skew — reloading for matching assets');
+}
+
 const SNAP_MS = 66;        // ~15 snapshots/sec
 const INPUT_MS = 33;       // ~30 input packets/sec
 const INTERP = 0.12;       // guests render remotes 120ms in the past
