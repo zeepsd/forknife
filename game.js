@@ -36,13 +36,14 @@ const RARITY = [
 ];
 
 const WEAPONS = {
-  pickaxe: { name: 'Pickaxe', melee: true, dmg: 20, structDmg: 50, rate: 2.2, range: 78 },
+  pickaxe: { name: 'Pickaxe', melee: true, dmg: 20, structDmg: 50, rate: 2.2, range: 78, key: 'pickaxe' },
   pistol:  { name: 'Pistol',         dmg: 24, rate: 4.5,  mag: 16, reload: 1.2, spread: 0.055, speed: 1500, range: 900,  auto: false, len: 26, wide: 7 },
   smg:     { name: 'SMG',            dmg: 15, rate: 11,   mag: 30, reload: 1.6, spread: 0.14,  speed: 1400, range: 680,  auto: true,  len: 30, wide: 8 },
   shotgun: { name: 'Pump Shotgun',   dmg: 9,  rate: 1.05, mag: 5,  reload: 2.3, spread: 0.17,  speed: 1300, range: 430,  auto: false, len: 36, wide: 9, pellets: 6 },
   ar:      { name: 'Assault Rifle',  dmg: 30, rate: 5.5,  mag: 30, reload: 2.0, spread: 0.05,  speed: 1700, range: 1100, auto: true,  len: 38, wide: 8 },
   sniper:  { name: 'Bolt Sniper',    dmg: 105,rate: 0.8,  mag: 1,  reload: 2.4, spread: 0.004, speed: 2600, range: 2000, auto: false, len: 46, wide: 7 },
 };
+for (const k in WEAPONS) WEAPONS[k].key = k;
 
 const HEALS = {
   bandage: { name: 'Bandage',      time: 2.5, color: '#ff8aa0', cap: 10 },
@@ -153,6 +154,20 @@ function sfxAt(name, x, y) {
   sfx(name, clamp(1 - d / 1300, 0.05, 1));
 }
 
+/* ---------------- net shim ----------------
+   mode: 'solo' (no networking), 'host' (authoritative, broadcasts snapshots),
+   'guest' (renders snapshots, sends inputs — sim functions below never run).
+   net.js drains NET.events into snapshots. */
+const NET = {
+  mode: 'solo',
+  events: [],
+  emit(e) { if (NET.mode === 'host') NET.events.push(e); },
+};
+function netSfxAt(name, x, y) {
+  sfxAt(name, x, y);
+  NET.emit({ e: 'sfx', s: name, x: Math.round(x), y: Math.round(y) });
+}
+
 /* ---------------- input ---------------- */
 const keys = {};
 const mouse = { x: 0, y: 0, down: false, clicked: false };
@@ -176,7 +191,8 @@ window.addEventListener('wheel', e => {
     s = (s + dir + 5) % 5;
     if (s === 0 || me.slots[s]) break;
   }
-  selectSlot(s);
+  selectSlot(me, s);
+  if (NET.mode === 'guest') window.netAction('slot', { n: s });
 });
 function worldMouse() {
   return { x: cam.x + (mouse.x - view.w / 2), y: cam.y + (mouse.y - view.h / 2) };
@@ -201,7 +217,11 @@ let hintText = '', hintT = 0;
 let shake = 0;
 let nearChest = null, nearLoot = null;
 
-function announce(big, small) { announceBig = big; announceSmall = small || ''; announceT = 3.2; }
+function announce(big, small, snd) {
+  announceBig = big; announceSmall = small || ''; announceT = 3.2;
+  if (snd) sfx(snd, 0.8);
+  NET.emit({ e: 'ann', b: big, s: small || '', snd: snd || null });
+}
 function hint(t) { hintText = t; hintT = 1.6; }
 function addFeed(text, color) { feed.unshift({ text, color: color || '#fff', t: 6 }); if (feed.length > 6) feed.pop(); }
 function addDmg(x, y, val, color) { dmgNums.push({ x: x + rand(-10, 10), y: y - 24, val: Math.max(1, Math.round(val)), color, t: 0.9 }); }
@@ -255,6 +275,10 @@ function genWorld() {
     else if (roll < 0.85) spawnLoot(x, y, randomHealItem());
     else spawnLoot(x, y, { kind: 'mats', count: 30 });
   }
+  // stable ids so guests can mirror removals
+  trees.forEach((t, i) => { t.id = i; });
+  rocks.forEach((r, i) => { r.id = i; });
+  chests.forEach((c, i) => { c.id = i; });
 }
 
 /* ---------------- items / loot ---------------- */
@@ -269,15 +293,24 @@ function randomHealItem() {
   const type = pickWeighted([['bandage', 34], ['mini', 34], ['big', 18], ['medkit', 14]]);
   return { kind: 'heal', type, count: type === 'bandage' ? 3 : type === 'mini' ? 3 : 1 };
 }
+let lootSeq = 0;
 function spawnLoot(x, y, item) {
-  loots.push(Object.assign({ x: clamp(x, 40, W - 40), y: clamp(y, 40, W - 40), bob: rand(0, 6.28) }, item));
+  const lo = Object.assign({ id: ++lootSeq, x: clamp(x, 40, W - 40), y: clamp(y, 40, W - 40), bob: rand(0, 6.28) }, item);
+  loots.push(lo);
+  NET.emit({ e: 'lootA', lo: { id: lo.id, x: Math.round(lo.x), y: Math.round(lo.y), kind: lo.kind, type: lo.type, rarity: lo.rarity, count: lo.count, mag: lo.mag } });
+}
+function removeLoot(lo) {
+  const idx = loots.indexOf(lo);
+  if (idx >= 0) loots.splice(idx, 1);
+  NET.emit({ e: 'lootD', id: lo.id });
 }
 function tossLoot(x, y, item) { spawnLoot(x + rand(-34, 34), y + rand(-34, 34), item); }
 function dmgOf(item) { return WEAPONS[item.type].dmg * RARITY[item.rarity].mult; }
 function openChest(ch, byMe) {
   if (ch.open) return;
   ch.open = true;
-  sfxAt('chest', ch.x, ch.y);
+  NET.emit({ e: 'chest', id: ch.id });
+  netSfxAt('chest', ch.x, ch.y);
   addParticles(ch.x, ch.y, ch.llama ? '#bb5cf5' : '#ffd54a', 16, 150);
   if (ch.llama) {
     tossLoot(ch.x, ch.y, { kind: 'mats', count: 60 });
@@ -296,6 +329,7 @@ function openChest(ch, byMe) {
 function makePlayer(name, isBot, color) {
   return {
     name, isBot, color,
+    id: 0, isRemoteHuman: false, netInput: null, clickQueue: 0, heldOverride: null, buildFlag: false,
     x: W / 2, y: W / 2, r: PLAYER_R,
     hp: 100, shield: 0, alive: true,
     air: false, alt: 0, glideTx: 0, glideTy: 0, dropped: false,
@@ -312,15 +346,15 @@ function makePlayer(name, isBot, color) {
     burstT: rand(0.3, 0.8), pauseT: 0,
   };
 }
-function selectSlot(s) {
-  if (!me.alive) return;
-  if (s !== 0 && !me.slots[s]) return;
-  if (me.sel !== s) { me.sel = s; me.useT = 0; me.reloadT = 0; me.buildMode = false; }
+function selectSlot(p, s) {
+  if (!p.alive) return;
+  if (s !== 0 && !p.slots[s]) return;
+  if (p.sel !== s) { p.sel = s; p.useT = 0; p.reloadT = 0; if (p === me) p.buildMode = false; }
 }
 function selectedItem(p) { return p.sel === 0 ? p.slots[0] : p.slots[p.sel]; }
 
 function pickupLoot(p, lo) {
-  if (lo.kind === 'mats') { p.mats = Math.min(999, p.mats + lo.count); sfx('pickup', 0.7); return true; }
+  if (lo.kind === 'mats') { p.mats = Math.min(999, p.mats + lo.count); netSfxAt('pickup', p.x, p.y); return true; }
   if (lo.kind === 'heal') {
     for (let i = 1; i < 5; i++) {
       const s = p.slots[i];
@@ -328,47 +362,65 @@ function pickupLoot(p, lo) {
         const cap = HEALS[lo.type].cap;
         if (s.count >= cap) return false;
         s.count = Math.min(cap, s.count + lo.count);
-        sfx('pickup', 0.8); return true;
+        netSfxAt('pickup', p.x, p.y); return true;
       }
     }
   }
   for (let i = 1; i < 5; i++) {
     if (!p.slots[i]) {
       p.slots[i] = { kind: lo.kind, type: lo.type, rarity: lo.rarity, mag: lo.mag, count: lo.count };
-      sfx('pickup', 0.8);
+      netSfxAt('pickup', p.x, p.y);
       return true;
     }
   }
   return false; // full
 }
-function swapWithSelected(lo) {
-  if (me.sel === 0) { hint('Inventory full — select a slot (2-5) to swap'); return false; }
-  const cur = me.slots[me.sel];
-  me.slots[me.sel] = { kind: lo.kind, type: lo.type, rarity: lo.rarity, mag: lo.mag, count: lo.count };
-  const idx = loots.indexOf(lo);
-  if (idx >= 0) loots.splice(idx, 1);
-  tossLoot(me.x, me.y, cur);
-  sfx('pickup', 0.8);
-  me.useT = 0; me.reloadT = 0;
+function swapWithSelected(p, lo) {
+  if (p.sel === 0) { if (p === me) hint('Inventory full — select a slot (2-5) to swap'); return false; }
+  const cur = p.slots[p.sel];
+  p.slots[p.sel] = { kind: lo.kind, type: lo.type, rarity: lo.rarity, mag: lo.mag, count: lo.count };
+  removeLoot(lo);
+  tossLoot(p.x, p.y, cur);
+  netSfxAt('pickup', p.x, p.y);
+  p.useT = 0; p.reloadT = 0;
   return true;
 }
-function dropSelected() {
-  if (!me.alive || me.sel === 0) return;
-  const cur = me.slots[me.sel];
+function dropSelected(p) {
+  if (!p.alive || p.sel === 0) return;
+  const cur = p.slots[p.sel];
   if (!cur) return;
-  tossLoot(me.x + Math.cos(me.aim) * 40, me.y + Math.sin(me.aim) * 40, cur);
-  me.slots[me.sel] = null;
-  me.sel = 0; me.useT = 0; me.reloadT = 0;
+  tossLoot(p.x + Math.cos(p.aim) * 40, p.y + Math.sin(p.aim) * 40, cur);
+  p.slots[p.sel] = null;
+  p.sel = 0; p.useT = 0; p.reloadT = 0;
+}
+function doInteract(p) {
+  let ch = null, chD = 80 * 80;
+  for (const c of chests) {
+    if (c.open) continue;
+    const d = dist2(p.x, p.y, c.x, c.y);
+    if (d < chD) { chD = d; ch = c; }
+  }
+  if (ch) { openChest(ch, p === me); return; }
+  let lo = null, loD = 70 * 70;
+  for (const l of loots) {
+    const d = dist2(p.x, p.y, l.x, l.y);
+    if (d < loD) { loD = d; lo = l; }
+  }
+  if (lo) {
+    if (!pickupLoot(p, lo)) { swapWithSelected(p, lo); return; }
+    removeLoot(lo);
+  }
 }
 
 /* ---------------- combat ---------------- */
+let bulletSeq = 0;
 function spawnBullet(owner, ang, stats, dmg) {
   const pellets = stats.pellets || 1;
   for (let i = 0; i < pellets; i++) {
     const a = ang + (Math.random() - 0.5) * 2 * stats.spread;
     const sx = owner.x + Math.cos(a) * (owner.r + 12);
     const sy = owner.y + Math.sin(a) * (owner.r + 12);
-    bullets.push({ x: sx, y: sy, px: sx, py: sy, dx: Math.cos(a), dy: Math.sin(a), speed: stats.speed, dmg, owner, traveled: 0, maxDist: stats.range });
+    bullets.push({ id: ++bulletSeq, w: stats.key, x: sx, y: sy, px: sx, py: sy, dx: Math.cos(a), dy: Math.sin(a), speed: stats.speed, dmg, owner, traveled: 0, maxDist: stats.range });
   }
 }
 function tryFireWeapon(p, item, wantFire, wantHold) {
@@ -380,7 +432,7 @@ function tryFireWeapon(p, item, wantFire, wantHold) {
   item.mag--;
   p.fireCd = 1 / stats.rate;
   spawnBullet(p, p.aim, stats, dmgOf(item));
-  sfxAt(item.type, p.x, p.y);
+  netSfxAt(item.type, p.x, p.y);
   if (p === me) shake = Math.min(8, shake + (item.type === 'sniper' ? 6 : item.type === 'shotgun' ? 4 : 1.5));
   if (item.mag <= 0) startReload(p, item);
 }
@@ -396,7 +448,7 @@ function swingPickaxe(p, wantHold) {
     p.swingT = 1 / stats.rate;
     p.swingHit = false;
     p.fireCd = 1 / stats.rate;
-    sfxAt('swing', p.x, p.y);
+    netSfxAt('swing', p.x, p.y);
   }
 }
 function meleeResolve(p) {
@@ -413,9 +465,16 @@ function meleeResolve(p) {
       t.hp -= stats.structDmg; t.hitT = 0.25;
       p.mats = Math.min(999, p.mats + 15);
       if (p === me) addDmg(t.x, t.y, 15, '#c8e664');
+      else if (p.isRemoteHuman) NET.emit({ e: 'mats', vid: p.id, x: Math.round(t.x), y: Math.round(t.y), n: 15 });
       addParticles(hx, hy, '#5a9c3c', 6, 120);
-      sfxAt('thunk', p.x, p.y);
-      if (t.hp <= 0) { trees.splice(trees.indexOf(t), 1); addParticles(t.x, t.y, '#4e8c34', 18, 180); sfxAt('breakS', t.x, t.y); }
+      netSfxAt('thunk', p.x, p.y);
+      NET.emit({ e: 'treeHit', id: t.id });
+      if (t.hp <= 0) {
+        trees.splice(trees.indexOf(t), 1);
+        addParticles(t.x, t.y, '#4e8c34', 18, 180);
+        netSfxAt('breakS', t.x, t.y);
+        NET.emit({ e: 'treeD', id: t.id });
+      }
       hitSomething = true; break;
     }
   }
@@ -424,9 +483,15 @@ function meleeResolve(p) {
       rk.hp -= stats.structDmg;
       p.mats = Math.min(999, p.mats + 12);
       if (p === me) addDmg(rk.x, rk.y, 12, '#d7dde6');
+      else if (p.isRemoteHuman) NET.emit({ e: 'mats', vid: p.id, x: Math.round(rk.x), y: Math.round(rk.y), n: 12 });
       addParticles(hx, hy, '#9aa3ad', 6, 120);
-      sfxAt('thunk', p.x, p.y);
-      if (rk.hp <= 0) { rocks.splice(rocks.indexOf(rk), 1); addParticles(rk.x, rk.y, '#8d959e', 18, 180); sfxAt('breakS', rk.x, rk.y); }
+      netSfxAt('thunk', p.x, p.y);
+      if (rk.hp <= 0) {
+        rocks.splice(rocks.indexOf(rk), 1);
+        addParticles(rk.x, rk.y, '#8d959e', 18, 180);
+        netSfxAt('breakS', rk.x, rk.y);
+        NET.emit({ e: 'rockD', id: rk.id });
+      }
       hitSomething = true; break;
     }
   }
@@ -441,8 +506,9 @@ function meleeResolve(p) {
 function applyDamage(victim, dmg, attacker, label, isStorm) {
   if (!victim.alive) return;
   let hpDmg = dmg;
+  let absorbed = 0;
   if (!isStorm && victim.shield > 0) {
-    const absorbed = Math.min(victim.shield, dmg);
+    absorbed = Math.min(victim.shield, dmg);
     victim.shield -= absorbed;
     hpDmg = dmg - absorbed;
     if (absorbed > 0.5) addDmg(victim.x, victim.y, absorbed, '#57c8ff');
@@ -451,6 +517,11 @@ function applyDamage(victim, dmg, attacker, label, isStorm) {
   victim.hp -= hpDmg;
   victim.hurtT = 0.3;
   if (!isStorm) {
+    NET.emit({
+      e: 'dmg', x: Math.round(victim.x), y: Math.round(victim.y),
+      hp: Math.round(hpDmg), sh: Math.round(absorbed),
+      vid: victim.id, aid: attacker ? attacker.id : -1, c: victim.color,
+    });
     addParticles(victim.x, victim.y, victim.color, 5, 140, 3);
     if (attacker === me && victim !== me) sfx('hitmark', 0.9);
     if (victim === me) { sfx('hurt', 0.9); shake = Math.min(10, shake + 4); }
@@ -461,14 +532,16 @@ function killPlayer(victim, attacker, label, isStorm) {
   victim.alive = false;
   victim.hp = 0;
   addParticles(victim.x, victim.y, victim.color, 26, 240, 5);
-  sfxAt('elim', victim.x, victim.y);
+  netSfxAt('elim', victim.x, victim.y);
   const who = isStorm ? 'The Storm' : (attacker ? attacker.name : '???');
+  const placement = players.filter(p => p.alive).length + 1;
   addFeed(`${who} eliminated ${victim.name}`, attacker === me ? '#ffd54a' : (victim === me ? '#ff5d6c' : '#e6e8ff'));
+  NET.emit({ e: 'kill', an: who, vn: victim.name, aid: attacker ? attacker.id : -1, vid: victim.id, place: placement });
   if (attacker && attacker !== victim && !isStorm) attacker.kills++;
   if (victim.isBot) dropBotLoot(victim);
+  else dropHumanLoot(victim);
   if (victim === me && !game.meDead) {
     game.meDead = true;
-    const placement = players.filter(p => p.alive).length + 1;
     sfx('lose');
     showDefeat(placement, who);
   }
@@ -479,15 +552,23 @@ function dropBotLoot(b) {
   for (let i = 0; i < b.botHeals; i++) if (chance(0.7)) tossLoot(b.x, b.y, { kind: 'heal', type: pick(['bandage', 'mini']), count: 1 });
   tossLoot(b.x, b.y, { kind: 'mats', count: randi(20, 50) });
 }
+function dropHumanLoot(v) {
+  for (let i = 1; i < 5; i++) {
+    const it = v.slots[i];
+    if (it) { tossLoot(v.x, v.y, it); v.slots[i] = null; }
+  }
+  if (v.mats > 0) tossLoot(v.x, v.y, { kind: 'mats', count: Math.min(v.mats, 150) });
+}
 function checkWin() {
   if (game.over || game.phase === 'menu') return;
   const alive = players.filter(p => p.alive);
   if (alive.length === 1) {
     game.over = true;
     game.winner = alive[0];
+    game.winnerId = alive[0].id;
     if (alive[0] === me) { sfx('win'); showVictory(); confettiBurst(); }
     else updateWinnerLine(alive[0].name);
-  } else if (alive.length === 0 && !game.meDead) {
+  } else if (alive.length === 0) {
     game.over = true;
   }
 }
@@ -501,16 +582,16 @@ function damageWall(key, dmg, attacker) {
   addParticles(wall.cx * GRID + GRID / 2, wall.cy * GRID + GRID / 2, '#b07c44', 5, 110);
   if (wall.hp <= 0) {
     walls.delete(key);
-    sfxAt('breakS', wall.cx * GRID, wall.cy * GRID);
+    netSfxAt('breakS', wall.cx * GRID, wall.cy * GRID);
     addParticles(wall.cx * GRID + GRID / 2, wall.cy * GRID + GRID / 2, '#9c6b38', 14, 170);
   }
 }
-function buildGhostCell() {
+function buildGhostCell(p) {
   const wm = worldMouse();
   let cx = Math.floor(wm.x / GRID), cy = Math.floor(wm.y / GRID);
   // clamp to within reach
-  const px = clamp(cx * GRID + GRID / 2, me.x - 200, me.x + 200);
-  const py = clamp(cy * GRID + GRID / 2, me.y - 200, me.y + 200);
+  const px = clamp(cx * GRID + GRID / 2, p.x - 200, p.x + 200);
+  const py = clamp(cy * GRID + GRID / 2, p.y - 200, p.y + 200);
   cx = Math.floor(px / GRID); cy = Math.floor(py / GRID);
   return { cx, cy };
 }
@@ -523,14 +604,16 @@ function canPlaceWall(cx, cy) {
   for (const ch of chests) if (dist2(x, y, ch.x, ch.y) < 50 * 50) return false;
   return true;
 }
-function tryPlaceWall() {
-  if (me.mats < 10) { hint('Not enough mats (need 10)'); return; }
-  const { cx, cy } = buildGhostCell();
+function tryPlaceWall(p, cx, cy) {
+  if (p.mats < 10) { if (p === me) hint('Not enough mats (need 10)'); return; }
+  // reach check (remote cells come from the network — never trust them blindly)
+  const wx = cx * GRID + GRID / 2, wy = cy * GRID + GRID / 2;
+  if (dist2(wx, wy, p.x, p.y) > 340 * 340) return;
   if (!canPlaceWall(cx, cy)) return;
   walls.set(cellKey(cx, cy), { cx, cy, hp: 150, maxHp: 150 });
-  me.mats -= 10;
-  me.buildCd = 0.16;
-  sfxAt('build', me.x, me.y);
+  p.mats -= 10;
+  p.buildCd = 0.16;
+  netSfxAt('build', p.x, p.y);
 }
 
 /* ---------------- LOS / collision ---------------- */
@@ -637,8 +720,7 @@ function updateStorm(dt) {
     if (storm.t <= 0) {
       storm.state = 'shrink'; storm.t = ph.shrink;
       setNextStormTarget();
-      announce('STORM SHRINKING', 'Get to the safe zone!');
-      sfx('storm', 0.8);
+      announce('STORM SHRINKING', 'Get to the safe zone!', 'storm');
     }
   } else { // shrink
     const k = clamp(1 - storm.t / ph.shrink, 0, 1);
@@ -687,8 +769,7 @@ function startBus() {
   for (const p of players) {
     if (p.isBot) p.dropAt = rand(0.12, 0.85) * bus.T;
   }
-  sfx('horn', 0.9);
-  announce('BATTLE BUS', 'Press SPACE to drop!');
+  announce('BATTLE BUS', 'Press SPACE to drop!', 'horn');
 }
 function dropPlayer(p, x, y) {
   p.dropped = true; p.air = true; p.alt = 1;
@@ -709,6 +790,9 @@ function updateBus(dt) {
   if (k >= 1) {
     bus.active = false;
     if (!me.dropped) { dropPlayer(me, clamp(bus.x, 100, W - 100), clamp(bus.y, 100, W - 100)); game.phase = 'play'; }
+    for (const p of players) {
+      if (p.isRemoteHuman && !p.dropped) dropPlayer(p, clamp(bus.x + rand(-60, 60), 100, W - 100), clamp(bus.y + rand(-60, 60), 100, W - 100));
+    }
   }
 }
 function updateAir(p, dt) {
@@ -895,7 +979,9 @@ function updateBot(b, dt) {
 function onKey(code) {
   if (game.phase === 'menu') return;
   if (code === 'KeyM') { muted = !muted; hint(muted ? 'Muted' : 'Sound on'); return; }
-  if (code === 'Space' && game.phase === 'bus' && !me.dropped) {
+  const guest = NET.mode === 'guest';
+  if (code === 'Space' && bus.active && me && !me.dropped) {
+    if (guest) { window.netAction('drop'); return; }
     dropPlayer(me, bus.x, bus.y);
     game.phase = 'play';
     return;
@@ -903,7 +989,10 @@ function onKey(code) {
   if (!me || !me.alive || me.air) return;
   if (code.startsWith('Digit')) {
     const n = parseInt(code.slice(5), 10);
-    if (n >= 1 && n <= 5) selectSlot(n - 1);
+    if (n >= 1 && n <= 5) {
+      selectSlot(me, n - 1);
+      if (guest) window.netAction('slot', { n: n - 1 });
+    }
   }
   if (code === 'KeyQ' || code === 'KeyB') {
     me.buildMode = !me.buildMode;
@@ -911,107 +1000,140 @@ function onKey(code) {
   }
   if (code === 'KeyR') {
     const item = selectedItem(me);
-    if (item && item.kind === 'weapon') startReload(me, item);
-  }
-  if (code === 'KeyE') {
-    if (nearChest) { openChest(nearChest, true); return; }
-    if (nearLoot) {
-      if (!pickupLoot(me, nearLoot)) { swapWithSelected(nearLoot); return; }
-      const idx = loots.indexOf(nearLoot);
-      if (idx >= 0) loots.splice(idx, 1);
+    if (item && item.kind === 'weapon') {
+      if (guest) window.netAction('reload');
+      else startReload(me, item);
     }
   }
-  if (code === 'KeyG') dropSelected();
+  if (code === 'KeyE') {
+    if (guest) { window.netGuestInteract(); return; }
+    doInteract(me);
+  }
+  if (code === 'KeyG') {
+    if (guest) { window.netAction('dropItem'); return; }
+    dropSelected(me);
+  }
 }
-function updateMe(dt) {
-  if (!me.alive) return;
-  if (me.air) { updateAir(me, dt); return; }
-  const wm = worldMouse();
-  me.aim = Math.atan2(wm.y - me.y, wm.x - me.x);
 
-  let mx = 0, my = 0;
-  if (keys.KeyW) my -= 1; if (keys.KeyS) my += 1;
-  if (keys.KeyA) mx -= 1; if (keys.KeyD) mx += 1;
-  const l = Math.hypot(mx, my);
-  let speed = 250;
-  if (me.useT > 0) speed *= 0.45;
-  if (l > 0) {
-    me.x += mx / l * speed * dt;
-    me.y += my / l * speed * dt;
-    me.moving = true; me.moveAng = Math.atan2(my, mx);
-  } else me.moving = false;
-  resolveWorld(me);
+/* drives the local player from keyboard/mouse, and remote humans from their
+   latest network input. Movement is client-authoritative for remote humans
+   (their browser simulates it and reports position); everything else —
+   firing, reloads, heals, pickups — resolves here on the authority. */
+function updateHuman(p, dt) {
+  if (!p.alive) return;
+  const local = (p === me);
+  if (p.air) {
+    if (local) { updateAir(p, dt); return; }
+    const ni = p.netInput;
+    if (ni && ni.dr && p.dropped) {
+      p.x = clamp(ni.x, 60, W - 60); p.y = clamp(ni.y, 60, W - 60);
+      p.alt = clamp(ni.alt, 0, 1);
+      if (ni.air === 0) {
+        p.alt = 0; p.air = false;
+        addParticles(p.x, p.y, '#cfe8b8', 10, 120);
+        resolveWorld(p);
+      }
+    }
+    return;
+  }
 
-  me.fireCd -= dt;
-  me.buildCd -= dt;
+  let inp;
+  if (local) {
+    const wm = worldMouse();
+    p.aim = Math.atan2(wm.y - p.y, wm.x - p.x);
+    let mx = 0, my = 0;
+    if (keys.KeyW) my -= 1; if (keys.KeyS) my += 1;
+    if (keys.KeyA) mx -= 1; if (keys.KeyD) mx += 1;
+    const l = Math.hypot(mx, my);
+    let speed = 250;
+    if (p.useT > 0) speed *= 0.45;
+    if (l > 0) {
+      p.x += mx / l * speed * dt;
+      p.y += my / l * speed * dt;
+      p.moving = true; p.moveAng = Math.atan2(my, mx);
+    } else p.moving = false;
+    resolveWorld(p);
+    inp = { fire: mouse.down, clicked: mouse.clicked, build: p.buildMode };
+  } else {
+    const ni = p.netInput || {};
+    if (typeof ni.x === 'number' && ni.dr) {
+      p.moving = Math.abs(ni.x - p.x) + Math.abs(ni.y - p.y) > 1.5;
+      p.x = clamp(ni.x, p.r, W - p.r); p.y = clamp(ni.y, p.r, W - p.r);
+    }
+    if (typeof ni.aim === 'number') p.aim = ni.aim;
+    p.buildFlag = !!ni.b;
+    inp = { fire: !!ni.f && !ni.b, clicked: p.clickQueue > 0, build: !!ni.b };
+    if (p.clickQueue > 0) p.clickQueue--;
+  }
+
+  p.fireCd -= dt;
+  p.buildCd -= dt;
 
   // reload
-  if (me.reloadT > 0) {
-    me.reloadT -= dt;
-    if (me.reloadT <= 0 && me.reloadItem) { me.reloadItem.mag = WEAPONS[me.reloadItem.type].mag; me.reloadItem = null; }
+  if (p.reloadT > 0) {
+    p.reloadT -= dt;
+    if (p.reloadT <= 0 && p.reloadItem) { p.reloadItem.mag = WEAPONS[p.reloadItem.type].mag; p.reloadItem = null; }
   }
   // swing anim & hit
-  if (me.swingT > 0) {
-    me.swingT -= dt;
-    if (!me.swingHit && me.swingT < 1 / WEAPONS.pickaxe.rate * 0.55) { me.swingHit = true; meleeResolve(me); }
+  if (p.swingT > 0) {
+    p.swingT -= dt;
+    if (!p.swingHit && p.swingT < 1 / WEAPONS.pickaxe.rate * 0.55) { p.swingHit = true; meleeResolve(p); }
   }
 
-  const item = selectedItem(me);
-  if (me.buildMode) {
-    if ((mouse.clicked || mouse.down) && me.buildCd <= 0) tryPlaceWall();
+  const item = selectedItem(p);
+  if (local && p.buildMode) {
+    if ((mouse.clicked || mouse.down) && p.buildCd <= 0) {
+      const g = buildGhostCell(p);
+      tryPlaceWall(p, g.cx, g.cy);
+    }
+  } else if (inp.build) {
+    // remote player in build mode: placement arrives as discrete actions
   } else if (item) {
-    if (item.kind === 'pickaxe') swingPickaxe(me, mouse.down);
-    else if (item.kind === 'weapon') tryFireWeapon(me, item, mouse.clicked, mouse.down);
+    if (item.kind === 'pickaxe') swingPickaxe(p, inp.fire);
+    else if (item.kind === 'weapon') tryFireWeapon(p, item, inp.clicked, inp.fire);
     else if (item.kind === 'heal') {
       const h = HEALS[item.type];
       const canUse =
-        (item.type === 'bandage' && me.hp < 75) ||
-        (item.type === 'medkit' && me.hp < 100) ||
-        (item.type === 'mini' && me.shield < 50) ||
-        (item.type === 'big' && me.shield < 100);
-      if (mouse.down && canUse) {
-        if (me.useT <= 0) { me.useT = h.time; me.useMax = h.time; }
+        (item.type === 'bandage' && p.hp < 75) ||
+        (item.type === 'medkit' && p.hp < 100) ||
+        (item.type === 'mini' && p.shield < 50) ||
+        (item.type === 'big' && p.shield < 100);
+      if (inp.fire && canUse) {
+        if (p.useT <= 0) { p.useT = h.time; p.useMax = h.time; }
       }
-      if (mouse.clicked && !canUse) {
+      if (local && inp.clicked && !canUse) {
         hint(item.type === 'mini' ? 'Minis cap shield at 50' : item.type === 'bandage' ? 'Bandages cap HP at 75' : 'Already full');
       }
-      if (me.useT > 0) {
-        if (!mouse.down) me.useT = 0; // cancel on release
+      if (p.useT > 0) {
+        if (!inp.fire) p.useT = 0; // cancel on release
         else {
-          me.useT -= dt;
-          if (me.useT <= 0) {
-            if (item.type === 'bandage') { me.hp = Math.min(75, me.hp + 15); sfx('heal'); }
-            if (item.type === 'medkit') { me.hp = 100; sfx('heal'); }
-            if (item.type === 'mini') { me.shield = Math.min(50, me.shield + 25); sfx('shield'); }
-            if (item.type === 'big') { me.shield = Math.min(100, me.shield + 50); sfx('shield'); }
+          p.useT -= dt;
+          if (p.useT <= 0) {
+            if (item.type === 'bandage') { p.hp = Math.min(75, p.hp + 15); netSfxAt('heal', p.x, p.y); }
+            if (item.type === 'medkit') { p.hp = 100; netSfxAt('heal', p.x, p.y); }
+            if (item.type === 'mini') { p.shield = Math.min(50, p.shield + 25); netSfxAt('shield', p.x, p.y); }
+            if (item.type === 'big') { p.shield = Math.min(100, p.shield + 50); netSfxAt('shield', p.x, p.y); }
             item.count--;
-            if (item.count <= 0) { me.slots[me.sel] = null; me.sel = 0; }
+            if (item.count <= 0) { p.slots[p.sel] = null; p.sel = 0; }
           }
         }
       }
     }
   }
 
-  // auto-pickup & nearby detection
-  nearChest = null; nearLoot = null;
+  // auto-pickup & (for the local player) interact prompts
+  if (local) { nearChest = null; nearLoot = null; }
   let bestChD = 80 * 80, bestLoD = 70 * 70;
-  for (const ch of chests) {
+  if (local) for (const ch of chests) {
     if (ch.open) continue;
-    const d2v = dist2(me.x, me.y, ch.x, ch.y);
+    const d2v = dist2(p.x, p.y, ch.x, ch.y);
     if (d2v < bestChD) { bestChD = d2v; nearChest = ch; }
   }
   for (let i = loots.length - 1; i >= 0; i--) {
     const lo = loots[i];
-    const d2v = dist2(me.x, me.y, lo.x, lo.y);
-    if (d2v < 38 * 38) {
-      // walk-over auto pickup (mats always; others if room)
-      if (lo.kind === 'mats' || pickupLoot(me, lo)) {
-        if (lo.kind === 'mats') { me.mats = Math.min(999, me.mats + lo.count); sfx('pickup', 0.6); }
-        loots.splice(i, 1);
-        continue;
-      }
-    }
-    if (d2v < bestLoD) { bestLoD = d2v; nearLoot = lo; }
+    const d2v = dist2(p.x, p.y, lo.x, lo.y);
+    if (d2v < 38 * 38 && pickupLoot(p, lo)) { removeLoot(lo); continue; }
+    if (local && d2v < bestLoD) { bestLoD = d2v; nearLoot = lo; }
   }
 }
 
@@ -1035,9 +1157,16 @@ function update(dt) {
     mouse.clicked = false;
     return;
   }
+  if (NET.mode === 'guest') {
+    // guests don't simulate the world — net.js replays it from snapshots
+    window.netGuestUpdate(dt);
+    mouse.clicked = false;
+    return;
+  }
   updateBus(dt);
   updateStorm(dt);
-  if (me && me.dropped) updateMe(dt);
+  if (me && me.dropped) updateHuman(me, dt);
+  for (const p of players) if (p.isRemoteHuman && p.alive && p.dropped) updateHuman(p, dt);
   for (const p of players) if (p.isBot && p.alive && p.dropped) updateBot(p, dt);
   updateBullets(dt);
   updateFx(dt);
@@ -1331,8 +1460,10 @@ function drawPlayers(time, airOnly) {
     if (!p.air) {
       ctx.save();
       ctx.rotate(p.aim);
-      const item = p.isBot ? (p.botWeapon ? { kind: 'weapon', type: p.botWeapon.type } : { kind: 'pickaxe' }) : (selectedItem(p) || { kind: 'pickaxe' });
-      if (p === me && me.buildMode) {
+      let item;
+      if (p.heldOverride) item = p.heldOverride === 'pickaxe' ? { kind: 'pickaxe' } : { kind: 'weapon', type: p.heldOverride };
+      else item = p.isBot ? (p.botWeapon ? { kind: 'weapon', type: p.botWeapon.type } : { kind: 'pickaxe' }) : (selectedItem(p) || { kind: 'pickaxe' });
+      if ((p === me && me.buildMode) || (p !== me && p.buildFlag)) {
         // holding mats
         ctx.fillStyle = '#a0682f'; ctx.fillRect(10, -8, 16, 16);
       } else if (item.kind === 'weapon') {
@@ -1453,7 +1584,7 @@ function drawStormOverlay(time) {
 }
 function drawBuildGhost() {
   if (!me || !me.alive || !me.buildMode || me.air) return;
-  const { cx, cy } = buildGhostCell();
+  const { cx, cy } = buildGhostCell(me);
   const ok = canPlaceWall(cx, cy) && me.mats >= 10;
   const s = S(cx * GRID, cy * GRID);
   ctx.fillStyle = ok ? 'rgba(120,220,120,0.3)' : 'rgba(230,80,80,0.3)';
@@ -1463,7 +1594,7 @@ function drawBuildGhost() {
   ctx.strokeRect(s.x, s.y, GRID, GRID);
 }
 function drawCrosshair() {
-  if (game.phase === 'bus' && !me.dropped) return;
+  if (bus.active && me && !me.dropped) return;
   ctx.strokeStyle = 'rgba(255,255,255,0.9)';
   ctx.lineWidth = 2;
   const m = mouse, g = 5, l = 8;
@@ -1703,24 +1834,41 @@ function hudPanel(x, y, w, h) {
 /* ---------------- screens / flow ---------------- */
 const menuEl = document.getElementById('menu');
 const endEl = document.getElementById('end');
+function endScreenButton() {
+  if (NET.mode === 'host') return {
+    label: 'REMATCH',
+    note: '<div class="sub" style="color:#8a8fb8">starts a fresh match for everyone in the room</div>',
+    onclick: () => window.netRematch(),
+  };
+  if (NET.mode === 'guest') return {
+    label: 'LEAVE MATCH',
+    note: '<div class="sub" style="color:#8a8fb8">hang tight — the host can start a rematch</div>',
+    onclick: () => location.reload(),
+  };
+  return { label: 'PLAY AGAIN', note: '', onclick: () => location.reload() };
+}
 function showVictory() {
+  const btn = endScreenButton();
   endEl.style.background = 'rgba(8,10,25,0.45)';
   endEl.innerHTML = `
     <div class="placement gold">#1 VICTORY ROYALE</div>
-    <div class="sub">${me.kills} elimination${me.kills === 1 ? '' : 's'} · ${BOT_COUNT + 1} players · absolute W</div>
-    <button id="againBtn" class="btn">PLAY AGAIN</button>`;
+    <div class="sub">${me.kills} elimination${me.kills === 1 ? '' : 's'} · ${players.length} players · absolute W</div>
+    ${btn.note}
+    <button id="againBtn" class="btn">${btn.label}</button>`;
   endEl.style.display = 'flex';
-  document.getElementById('againBtn').onclick = () => location.reload();
+  document.getElementById('againBtn').onclick = btn.onclick;
 }
 function showDefeat(placement, killer) {
+  const btn = endScreenButton();
   endEl.style.background = 'rgba(8,10,25,0.45)';
   endEl.innerHTML = `
     <div class="placement red">#${placement}</div>
     <div class="sub">Eliminated by <b style="color:#fff">${killer}</b> · ${me.kills} elimination${me.kills === 1 ? '' : 's'}</div>
     <div class="sub" id="winnerLine" style="color:#ffd54a"></div>
-    <button id="againBtn" class="btn">PLAY AGAIN</button>`;
+    ${btn.note}
+    <button id="againBtn" class="btn">${btn.label}</button>`;
   endEl.style.display = 'flex';
-  document.getElementById('againBtn').onclick = () => location.reload();
+  document.getElementById('againBtn').onclick = btn.onclick;
 }
 function updateWinnerLine(name) {
   const el = document.getElementById('winnerLine');
@@ -1738,27 +1886,45 @@ function confettiBurst() {
     });
   }
 }
-function startGame() {
+function startGame(opts) {
+  opts = opts || {};
   initAudio();
   if (actx && actx.state === 'suspended') actx.resume();
   menuEl.style.display = 'none';
   endEl.style.display = 'none';
+  document.getElementById('lobby').style.display = 'none';
+  NET.mode = opts.mode === 'host' ? 'host' : 'solo';
   genWorld();
+  NET.events.length = 0; // guests get the freshly-generated world wholesale, not as events
   players = [];
-  me = makePlayer('YOU', false, '#ffd54a');
+  me = makePlayer(opts.myName || 'YOU', false, '#ffd54a');
+  me.id = 0;
   players.push(me);
+  const GUEST_COLORS = ['#4dabf7', '#69db7c', '#f783ac', '#ffa94d', '#38d9a9'];
+  (opts.guests || []).forEach((g, i) => {
+    const p = makePlayer(g.name, false, GUEST_COLORS[i % GUEST_COLORS.length]);
+    p.id = g.id;
+    p.isRemoteHuman = true;
+    players.push(p);
+  });
+  const botCount = Math.max(0, BOT_COUNT + 1 - players.length);
   const names = BOT_NAMES.slice();
-  for (let i = 0; i < BOT_COUNT; i++) {
+  for (let i = 0; i < botCount; i++) {
     const idx = randi(0, names.length - 1);
     const nm = names.splice(idx, 1)[0] || ('Bot' + i);
-    players.push(makePlayer(nm, true, BOT_COLORS[i % BOT_COLORS.length]));
+    const b = makePlayer(nm, true, BOT_COLORS[i % BOT_COLORS.length]);
+    b.id = 100 + i;
+    players.push(b);
   }
   Object.assign(storm, { x: W / 2, y: W / 2, r: 1500, phase: 0, state: 'wait', t: STORM_PHASES[0].wait });
   bullets = []; particles = []; dmgNums = []; feed = [];
-  game.phase = 'bus'; game.over = false; game.meDead = false; game.winner = null; game.time = 0;
+  game.phase = 'bus'; game.over = false; game.meDead = false; game.winner = null; game.winnerId = -1; game.time = 0;
   startBus();
 }
-document.getElementById('playBtn').addEventListener('click', startGame);
+document.getElementById('playBtn').addEventListener('click', () => {
+  if (window.netShutdown) window.netShutdown();
+  startGame({});
+});
 
 /* ---------------- boot ---------------- */
 genWorld(); // pretty backdrop behind the menu
@@ -1766,4 +1932,4 @@ makeGround();
 requestAnimationFrame(t => { lastT = t; requestAnimationFrame(frame); });
 
 // expose for testing
-window.G = () => ({ game, me, players, storm, bullets, loots, walls, bus });
+window.G = () => ({ game, me, players, storm, bullets, loots, walls, bus, NET, trees, rocks, chests });
