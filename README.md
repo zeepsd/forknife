@@ -1,14 +1,30 @@
 # FORKNIFE
 
 The legally distinct battle royale. A Fortnite knock-off that runs in your browser —
-no dependencies, no build step, all procedural canvas art.
+no build step, all procedural canvas art. **Play it live: https://zeepsd.github.io/forknife/**
 
 ## Play
 
-Open `index.html` in any browser (or `open ~/forknife/index.html`).
+Solo: hit PLAY SOLO — you + 15 bots.
 
-You + 15 bots. Ride the battle bus, drop, loot, build, outlast the storm.
+**With friends:** one player hits HOST MATCH and shares the 4-letter room code;
+everyone else types it and hits JOIN (up to 6 humans, bots fill the lobby to 16).
+Ride the battle bus, drop, loot, build, outlast the storm.
 Last one standing gets the **#1 VICTORY ROYALE**.
+
+## Multiplayer architecture
+
+Peer-to-peer over WebRTC (vendored PeerJS, free public broker — no game server).
+The **host's browser is the authority**: it runs the entire sim (bots, bullets,
+storm, loot) exactly like solo. Guests send inputs at 30Hz and discrete actions
+(shoot click, slot, interact, place wall) over a reliable ordered DataChannel;
+the host broadcasts ~15Hz snapshots plus an event stream (damage numbers, kill
+feed, sounds, loot changes). Guests render remote players 120ms in the past with
+interpolation, fly bullets between snapshots, and simulate **their own movement
+locally** (client-authoritative position = zero input lag; it's a friends game,
+not an anti-cheat exercise). Host disconnect ends the match; guest disconnects
+eliminate that player and drop their loot. The host can REMATCH in place —
+guests get a fresh world without rejoining.
 
 ## Controls
 
